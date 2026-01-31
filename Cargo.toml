@@ -1,0 +1,22 @@
+[package]
+name = "normal-path"
+description = "Normalize paths without I/O"
+version = "0.1.0"
+edition = "2024"
+
+authors = ["Auckas <auckas@pm.me>"]
+license = "ISC"
+
+[dependencies.serde]
+version = "1.0"
+optional = true
+
+[dependencies.thiserror]
+version = "2.0"
+
+[dev-dependencies.fastrand]
+version = "2.3"
+
+[features]
+default = []
+serde = ["dep:serde"]
