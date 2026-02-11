@@ -5,7 +5,7 @@ version = "0.1.0"
 edition = "2024"
 
 authors = ["Auckas <auckas@pm.me>"]
-license = "ISC"
+license = "MIT OR Apache-2.0"
 
 [dependencies.serde]
 version = "1.0"
