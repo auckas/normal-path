@@ -1,11 +1,12 @@
-{ lib, config, inputs, ... }: {
+{ lib, config, inputs, ... }: let
+  inherit (lib) filterAttrs isDerivation licenses;
+  onlyDrvs = filterAttrs (_: isDerivation);
+in {
   perSystem = { config, pkgs, ... }: let
-    myChecks = pkgs.callPackage ../checks {
+    myChecks = pkgs.callPackage ../checks.nix {
       inherit (inputs) crane rust-overlay;
     };
   in {
-    checks = {
-      inherit (myChecks) cargo-test;
-    };
+    checks = onlyDrvs myChecks;
   };
 }
