@@ -119,10 +119,6 @@ fn check_component_canonical(path: &Path) -> Result<(), E> {
     }
 }
 
-fn normalize_new(path: &Path) -> PathBuf {
-    path.components().collect()
-}
-
 fn normalize_in_place(path: &mut Vec<u8>) -> Option<E> {
     let mut pos = 0;
     let mut has_parent = false;
@@ -258,7 +254,12 @@ pub fn validate_parentless(path: &Path) -> Result<&Normpath, E> {
 pub fn normalize_new_cow<'a>(path: &'a Path) -> Result<Cow<'a, Normpath>, E> {
     match validate_fully(path) {
         Ok(p) => Ok(Cow::Borrowed(p)),
-        Err(E::NotCanonical) => Ok(Cow::Owned(NormpathBuf(normalize_new(path)))),
+        Err(E::NotCanonical) => {
+            let mut path = path.into();
+            normalize(&mut path).expect("should be able to normalize away non-canonicality");
+
+            Ok(Cow::Owned(NormpathBuf(path)))
+        }
         Err(e) => Err(e),
     }
 }

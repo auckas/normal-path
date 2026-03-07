@@ -4,7 +4,7 @@ use std::{
     borrow::Cow,
     ffi::{OsStr, OsString},
     mem,
-    path::{self, Component, Path, PathBuf, Prefix, PrefixComponent},
+    path::{Component, Path, PathBuf, Prefix, PrefixComponent},
 };
 
 use super::super::trivial::{
@@ -288,86 +288,6 @@ fn normalize_slash(path: &mut [u8], at: usize) {
     path[at] = b'\\';
 }
 
-#[cfg(debug_assertions)]
-fn assert_components_canonical(path: &Path) {
-    let mut at_start = true;
-    for component in path.components() {
-        use {path::Prefix::*, Component::*};
-        match component {
-            Prefix(component) => match component.kind() {
-                Disk(_) => match component.as_os_str().as_encoded_bytes()[0] {
-                    b'a'..=b'z' => panic!("drive letter should be uppercase"),
-                    _ => continue,
-                },
-                it if it.is_verbatim() => return,
-                _ => continue,
-            },
-            RootDir => continue,
-            CurDir => continue,
-            Normal(_) => at_start = false,
-            ParentDir if at_start => continue,
-            ParentDir => panic!("parent directory in middle"),
-        }
-    }
-}
-
-#[cfg(not(debug_assertions))]
-#[inline(always)]
-fn assert_components_canonical(_: &Path) {}
-
-fn normalize_new(path: &Path) -> PathBuf {
-    let mut out = PathBuf::with_capacity(len!(path));
-    let mut namespace = None;
-    for component in path.components() {
-        use {path::Prefix::*, Component::*};
-        match component {
-            Prefix(component) => match component.kind() {
-                Disk(c) => {
-                    let prefix = [c.to_ascii_uppercase(), b':'];
-                    // SAFETY: always a valid UTF-8
-                    out.push(unsafe { OsStr::from_encoded_bytes_unchecked(&prefix) })
-                }
-                DeviceNS(_) => {
-                    namespace = Some(1);
-                    out.push(component.as_os_str());
-                }
-                UNC(server, _) => {
-                    namespace = Some(server.len());
-                    out.push(component.as_os_str());
-                }
-                _ => return path.into(),
-            },
-            RootDir => out.push("\\"),
-            CurDir => continue,
-            ParentDir if out.file_name().is_some() => assert!(out.pop()),
-            ParentDir => out.push(".."),
-            Normal(name) => out.push(name),
-        }
-    }
-
-    if let Some(name) = namespace {
-        let mut bytes = out.into_os_string().into_encoded_bytes();
-        normalize_slash(&mut bytes, 0);
-        normalize_slash(&mut bytes, 1);
-        normalize_slash(&mut bytes, 2 + name);
-
-        if bytes[bytes.len() - 1] == b'\\' {
-            bytes.pop();
-        }
-
-        // SAFETY: the sequence is only altered in two ways:
-        // 1. a valid UTF-8 substring (`/`) is replaced by another valid UTF-8
-        //    string (`\`).
-        // 2. a valid UTF-8 substring (`\`) is removed from the end.
-        //
-        // These two preserve the validity of the OS string encoding.
-        out = unsafe { OsString::from_encoded_bytes_unchecked(bytes) }.into();
-    }
-
-    assert_components_canonical(&out);
-    out
-}
-
 fn position_pop_slash(path: &[u8], start: usize, bottom: usize, pos: usize) -> Option<usize> {
     debug_assert!(start <= bottom);
     debug_assert!(bottom <= pos);
@@ -620,7 +540,12 @@ pub fn validate_parentless(path: &Path) -> Result<&Normpath, E> {
 pub fn normalize_new_cow<'a>(path: &'a Path) -> Result<Cow<'a, Normpath>, E> {
     match validate_fully(path) {
         Ok(validated) => Ok(Cow::Borrowed(validated)),
-        Err(E::NotCanonical) => Ok(Cow::Owned(NormpathBuf(normalize_new(path)))),
+        Err(E::NotCanonical) => {
+            let mut path = path.into();
+            normalize(&mut path).expect("should be able to normalize away non-canonicality");
+
+            Ok(Cow::Owned(NormpathBuf(path)))
+        }
         Err(e) => Err(e),
     }
 }
