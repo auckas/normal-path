@@ -12,6 +12,12 @@ use super::super::trivial::{
     cast_ref_unchecked, ConvertError as Ec, Error as E, Normpath, NormpathBuf,
 };
 
+macro_rules! bytes {
+    ($path:expr) => {
+        $path.as_os_str().as_bytes()
+    };
+}
+
 #[derive(Debug)]
 struct Searcher<'a> {
     haystack: &'a [u8],
@@ -58,12 +64,11 @@ fn search_next(s: &mut Searcher<'_>) -> Option<E> {
 
 impl<'a> Searcher<'a> {
     fn new(value: &'a Path) -> Result<Self, E> {
-        let bytes = value.as_os_str().as_bytes();
-        if bytes.len() <= 1 {
-            match bytes.first() {
-                Some(b'.') => Err(E::NotCanonical),
-                _ => Ok(Self { haystack: &[] }),
-            }
+        let bytes = bytes!(value);
+        if bytes.is_empty() {
+            Err(E::NotCanonical)
+        } else if bytes.len() <= 1 {
+            Ok(Self { haystack: &[] })
         } else {
             Ok(Self { haystack: bytes })
         }
@@ -186,6 +191,9 @@ fn normalize_in_place(path: &mut Vec<u8>) -> Option<E> {
     }
 
     path.truncate(pos);
+    if pos == 0 {
+        path.push(b'.');
+    }
 
     if has_parent {
         Some(E::ContainsParent)
@@ -282,7 +290,7 @@ where
 
 pub fn push(buf: &mut PathBuf, path: &Path) -> Result<(), E> {
     let canonical = match check_component_parentless(path) {
-        Ok(_) => true,
+        Ok(_) => bytes!(path) != b".",
         Err(E::NotCanonical) => false,
         Err(e) => return Err(e),
     };
@@ -306,8 +314,8 @@ pub fn push(buf: &mut PathBuf, path: &Path) -> Result<(), E> {
 }
 
 pub fn strip<'a>(path: &'a Path, base: &Path) -> Option<&'a Path> {
-    let path = path.as_os_str().as_bytes();
-    let base = base.as_os_str().as_bytes();
+    let path = bytes!(path);
+    let base = bytes!(base);
 
     if path.starts_with(base) {
         match path.get(base.len()) {

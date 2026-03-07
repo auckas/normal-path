@@ -578,7 +578,7 @@ impl NormpathBuf {
     ///
     /// let path2 = PathBuf::from(r"./\foo\../bar\..");
     /// let err2 = NormpathBuf::normalize(path2).unwrap_err();
-    /// assert_eq!(&err2.value, "");
+    /// assert_eq!(&err2.value, ".");
     /// # }
     /// ```
     ///
@@ -865,7 +865,7 @@ impl<'de> Deserialize<'de> for Box<Normpath> {
 ///
 /// let path2 = PathBuf::from(r"./\foo\../bar\..");
 /// let norm2 = canonicalize_lexically(path2);
-/// assert_eq!(&norm2, "");
+/// assert_eq!(&norm2, ".");
 /// # }
 /// ```
 #[must_use]
@@ -908,15 +908,24 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn to_canonical(path: &Path) -> PathBuf {
-        path.components()
+    fn to_canonical(path: impl AsRef<Path>) -> PathBuf {
+        let collected = path
+            .as_ref()
+            .components()
             .filter(|c| !matches!(c, Component::CurDir))
-            .collect()
+            .collect::<PathBuf>();
+
+        if collected.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            collected
+        }
     }
 
     #[cfg(windows)]
-    fn to_canonical(path: &Path) -> PathBuf {
+    fn to_canonical(path: impl AsRef<Path>) -> PathBuf {
         use std::path::Prefix;
+        let path = path.as_ref();
 
         let mut out = PathBuf::with_capacity(path.as_os_str().len());
         for component in path.components() {
@@ -957,6 +966,14 @@ mod tests {
             }
             _ => false,
         };
+        let is_blank = match first {
+            Some(Component::Prefix(prefix)) => {
+                matches!(prefix.kind(), Prefix::Disk(_)) && tail.as_os_str().is_empty()
+            }
+            Some(_) => false,
+            None => true,
+        };
+        assert!(!is_phony || !is_blank);
 
         if is_phony {
             let mut bytes = std::mem::take(&mut out)
@@ -965,24 +982,29 @@ mod tests {
 
             bytes.pop();
             out = unsafe { OsString::from_encoded_bytes_unchecked(bytes) }.into();
+        } else if is_blank {
+            out.push(".");
         }
 
         out
     }
 
-    fn is_canonical(path: &Path) -> bool {
+    fn is_canonical(path: impl AsRef<Path>) -> bool {
+        let path = path.as_ref();
         path.as_os_str() == to_canonical(path).as_os_str()
     }
 
     #[cfg(unix)]
-    fn is_parentless(path: &Path) -> bool {
-        path.components()
+    fn is_parentless(path: impl AsRef<Path>) -> bool {
+        path.as_ref()
+            .components()
             .all(|c| !matches!(c, Component::ParentDir))
     }
 
     #[cfg(windows)]
-    fn is_parentless(path: &Path) -> bool {
+    fn is_parentless(path: impl AsRef<Path>) -> bool {
         use Component::*;
+        let path = path.as_ref();
 
         let mut components = path.components();
         let start = match components.next() {
@@ -1003,7 +1025,8 @@ mod tests {
             .is_some()
     }
 
-    fn is_normalized(path: &Path) -> bool {
+    fn is_normalized(path: impl AsRef<Path>) -> bool {
+        let path = path.as_ref();
         path.is_absolute() && is_canonical(path) && is_parentless(path)
     }
 
@@ -1058,9 +1081,13 @@ mod tests {
     pub fn example_normalize() {
         assert_eq!(test_normalize("/foo/bar"), "/foo/bar");
         assert_eq!(test_normalize("//foo/./..//bar//"), "/foo/../bar");
+        assert_eq!(test_normalize("//./"), "/");
 
         assert_eq!(test_normalize("foo/bar"), "foo/bar");
         assert_eq!(test_normalize(".//foo/.//bar/..//"), "foo/bar/..");
+        assert_eq!(test_normalize("././/."), ".");
+
+        assert_eq!(test_normalize(""), ".");
     }
 
     #[cfg(windows)]
@@ -1071,7 +1098,7 @@ mod tests {
         assert_eq!(test_normalize(r"c:\/foo\..\./../bar/.."), r"C:\..");
 
         assert_eq!(test_normalize(r"foo\bar"), r"foo\bar");
-        assert_eq!(test_normalize(r".\/foo\./\../"), r"");
+        assert_eq!(test_normalize(r".\/foo\./\../"), r".");
         assert_eq!(test_normalize(r".\/foo/..\bar/../..//"), r"..");
 
         assert_eq!(test_normalize(r"\/.\dev\foo"), r"\\.\dev\foo");
@@ -1084,7 +1111,10 @@ mod tests {
 
         assert_eq!(test_normalize(r"C:foo\bar"), r"C:foo\bar");
         assert_eq!(test_normalize(r"c:.\\foo\../\bar//"), r"C:bar");
-        assert_eq!(test_normalize(r"c:.\foo\../bar/.."), r"C:");
+        assert_eq!(test_normalize(r"c:.\foo\../bar/.."), r"C:.");
+
+        assert_eq!(test_normalize(r""), r".");
+        assert_eq!(test_normalize(r"C:"), r"C:.");
 
         // No normalization will ever be applied to verbatim paths.
         assert_eq!(
@@ -1101,7 +1131,7 @@ mod tests {
     pub fn normalize() {
         let paths = make_paths(1..64, draw::common);
         for path in paths.take(1024) {
-            let reference = to_canonical(Path::new(&path));
+            let reference = to_canonical(&path);
             let ours = test_normalize(&path);
 
             assert_eq!(reference.as_os_str(), ours, "original: {path:?}");
@@ -1110,8 +1140,10 @@ mod tests {
 
     #[cfg(unix)]
     fn test_push(subject: &mut NormpathBuf, reference: &mut PathBuf, component: &str) {
-        if is_parentless(component.as_ref()) {
-            reference.push(component);
+        if is_parentless(component) {
+            if component != "." {
+                reference.push(component);
+            }
             subject.push(component).unwrap();
 
             assert_eq!(subject.as_path(), reference.as_path());
@@ -1263,6 +1295,7 @@ mod tests {
         assert_eq!(Normpath::validate_canonical(&path), Err(error));
         assert_eq!(Normpath::validate_parentless(&path), Err(error));
 
+        assert_eq!(Normpath::normalize(&path), Err(error));
         assert_eq!(
             NormpathBuf::validate(&path).map_err(into_source),
             Err(error),
@@ -1277,7 +1310,7 @@ mod tests {
         assert_eq!(conv_err.value, path);
     }
 
-    fn test_err_noncanonical(path: &str, canonical: impl AsRef<Path>) {
+    fn test_err_single_canon(path: &str, canonical: impl AsRef<Path>) {
         assert_eq!(Normpath::validate(&path), Err(E::NotCanonical));
         assert_eq!(Normpath::validate_canonical(&path), Err(E::NotCanonical));
         assert_eq!(Normpath::validate_parentless(&path), Err(E::NotCanonical));
@@ -1295,32 +1328,61 @@ mod tests {
 
         let buf_converted = NormpathBuf::try_from(path.to_string()).unwrap();
         assert_eq!(&buf_converted, canonical.as_ref());
+
+        let buf_converted_ref = NormpathBuf::try_from(path).unwrap();
+        assert_eq!(&buf_converted_ref, canonical.as_ref());
+    }
+
+    fn test_err_has_canon(path: &str) {
+        assert_eq!(Normpath::validate_canonical(path), Err(E::NotCanonical));
+
+        assert!(Normpath::validate(&path).is_err());
+        assert!(Normpath::validate_parentless(&path).is_err());
+        assert!(NormpathBuf::validate(&path).is_err());
+    }
+
+    fn test_err_has_parent(path: &str) {
+        assert_eq!(Normpath::validate_parentless(path), Err(E::ContainsParent));
+
+        assert!(Normpath::validate(&path).is_err());
+        assert!(Normpath::validate_canonical(&path).is_err());
+        assert!(NormpathBuf::validate(&path).is_err());
+
+        assert!(Normpath::normalize(&path).is_err());
+        assert!(NormpathBuf::normalize(PathBuf::from(&path)).is_err());
+        assert!(NormpathBuf::try_from(path).is_err());
+        assert!(NormpathBuf::try_from(path.to_string()).is_err());
+    }
+
+    fn test_err_has_both(path: &str) {
+        test_err_has_canon(path);
+        test_err_has_parent(path);
     }
 
     #[cfg(unix)]
     #[test]
     pub fn examples_err_single_relative() {
-        test_err_single("", E::NotAbsolute);
+        test_err_single(".", E::NotAbsolute);
         test_err_single("foo/bar", E::NotAbsolute);
     }
 
     #[cfg(windows)]
     #[test]
     pub fn examples_err_single_relative() {
-        test_err_single("", E::NotAbsolute);
+        test_err_single(".", E::NotAbsolute);
         test_err_single(r"foo\bar", E::NotAbsolute);
 
         test_err_single(r"\", E::NotAbsolute);
         test_err_single(r"\foo\bar", E::NotAbsolute);
 
-        test_err_single(r"C:", E::NotAbsolute);
+        test_err_single(r"C:.", E::NotAbsolute);
         test_err_single(r"C:foo\bar", E::NotAbsolute);
     }
 
     #[test]
     pub fn err_single_relative() {
-        let paths = make_paths(1..64, draw::relative)
-            .filter(|p| is_parentless(p.as_ref()) && is_canonical(p.as_ref()));
+        let paths = make_paths(1..64, draw::relative) //
+            .filter(|p| is_parentless(p) && is_canonical(p));
 
         for path in paths.take(256) {
             test_err_single(&path, E::NotAbsolute);
@@ -1346,7 +1408,7 @@ mod tests {
     #[test]
     pub fn err_single_parent() {
         let paths = make_paths(MIN_ABS..64, draw::absolute)
-            .filter(|p| !is_parentless(Path::new(p)) && is_canonical(Path::new(p)));
+            .filter(|p| !is_parentless(p) && is_canonical(p));
 
         for path in paths.take(256) {
             test_err_single(&path, E::ContainsParent);
@@ -1355,76 +1417,89 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    pub fn examples_err_single_noncanonical() {
-        test_err_noncanonical("//", "/");
-        test_err_noncanonical("/.", "/");
-        test_err_noncanonical("/foo//bar", "/foo/bar");
-        test_err_noncanonical("/foo/./bar", "/foo/bar");
-        test_err_noncanonical("/foo/bar/", "/foo/bar");
-        test_err_noncanonical("/.../..../", "/.../....");
+    pub fn examples_err_single_canon() {
+        test_err_single_canon("//", "/");
+        test_err_single_canon("/.", "/");
+        test_err_single_canon("/foo//bar", "/foo/bar");
+        test_err_single_canon("/foo/./bar", "/foo/bar");
+        test_err_single_canon("/foo/bar/", "/foo/bar");
+        test_err_single_canon("/.../..../", "/.../....");
     }
 
     #[cfg(windows)]
     #[test]
-    pub fn examples_err_single_noncanonical() {
-        test_err_noncanonical(r"c:\", r"C:\");
-        test_err_noncanonical(r"C:\\", r"C:\");
-        test_err_noncanonical(r"C:\.", r"C:\");
-        test_err_noncanonical(r"C:\foo\..", r"C:\");
-        test_err_noncanonical(r"C:/foo/bar", r"C:\foo\bar");
-        test_err_noncanonical(r"C:\foo\\bar", r"C:\foo\bar");
-        test_err_noncanonical(r"C:\foo\.\bar", r"C:\foo\bar");
-        test_err_noncanonical(r"C:\foo\bar\", r"C:\foo\bar");
-        test_err_noncanonical(r"C:/.../....", r"C:\...\....");
+    pub fn examples_err_single_canon() {
+        test_err_single_canon(r"c:\", r"C:\");
+        test_err_single_canon(r"C:\\", r"C:\");
+        test_err_single_canon(r"C:\.", r"C:\");
+        test_err_single_canon(r"C:\foo\..", r"C:\");
+        test_err_single_canon(r"C:/foo/bar", r"C:\foo\bar");
+        test_err_single_canon(r"C:\foo\\bar", r"C:\foo\bar");
+        test_err_single_canon(r"C:\foo\.\bar", r"C:\foo\bar");
+        test_err_single_canon(r"C:\foo\bar\", r"C:\foo\bar");
+        test_err_single_canon(r"C:/.../....", r"C:\...\....");
 
-        test_err_noncanonical(r"\\.\dev\\", r"\\.\dev\");
-        test_err_noncanonical(r"\\.\dev\.", r"\\.\dev\");
-        test_err_noncanonical(r"\\s\s\\", r"\\s\s\");
-        test_err_noncanonical(r"\\s\s\.", r"\\s\s\");
+        test_err_single_canon(r"\\.\dev\\", r"\\.\dev\");
+        test_err_single_canon(r"\\.\dev\.", r"\\.\dev\");
+        test_err_single_canon(r"\\s\s\\", r"\\s\s\");
+        test_err_single_canon(r"\\s\s\.", r"\\s\s\");
     }
 
     #[test]
-    pub fn err_single_noncanonical() {
+    pub fn err_single_canon() {
         let paths = make_paths(MIN_ABS..64, draw::absolute)
-            .filter(|p| !is_canonical(Path::new(p)) && is_parentless(Path::new(p)));
+            .filter(|p| !is_canonical(p) && is_parentless(p));
 
         for path in paths.take(256) {
-            test_err_noncanonical(&path, to_canonical(path.as_ref()));
+            test_err_single_canon(&path, to_canonical(&path));
         }
-    }
-
-    fn test_err_preference(path: &str) {
-        assert_eq!(Normpath::validate_canonical(path), Err(E::NotCanonical));
-        assert_eq!(Normpath::validate_parentless(path), Err(E::ContainsParent));
     }
 
     #[cfg(unix)]
     #[test]
-    pub fn examples_err_preference() {
-        test_err_preference("/foo/../bar/");
-        test_err_preference("//foo/../bar");
+    pub fn examples_err_focus() {
+        test_err_has_canon("");
+
+        test_err_has_both("/foo/../bar/");
+        test_err_has_both("//foo/../bar");
+
+        test_err_has_both("foo/../bar/");
+        test_err_has_both("./foo/../bar");
     }
 
     #[cfg(windows)]
     #[test]
-    pub fn examples_err_preference() {
-        test_err_preference(r"C:\..\foo\bar\");
-        test_err_preference(r"C:\\foo\..\..\bar");
-        test_err_preference(r"C:\foo\..\..");
+    pub fn examples_err_focus() {
+        test_err_has_canon(r"");
+        test_err_has_canon(r"C:");
 
-        test_err_preference(r"\\.\dev\..\foo\bar\");
-        test_err_preference(r"\\.\dev\\foo\..\..\bar");
-        test_err_preference(r"\\s\s\..\foo\bar\");
-        test_err_preference(r"\\s\s\\foo\..\..\bar");
+        test_err_has_both(r"C:\..\foo\bar\");
+        test_err_has_both(r"C:\\foo\..\..\bar");
+        test_err_has_both(r"C:\foo\..\..");
+
+        test_err_has_both(r"..\foo\bar\");
+        test_err_has_both(r".\foo\..\..\bar");
+        test_err_has_both(r"foo\..\..");
+
+        test_err_has_both(r"\\.\dev\..\foo\bar\");
+        test_err_has_both(r"\\.\dev\\foo\..\..\bar");
+        test_err_has_both(r"\\s\s\..\foo\bar\");
+        test_err_has_both(r"\\s\s\\foo\..\..\bar");
     }
 
     #[test]
-    pub fn err_preference() {
-        let paths = make_paths(MIN_ABS..64, draw::absolute)
-            .filter(|p| !is_canonical(Path::new(p)) && !is_parentless(Path::new(p)));
-
+    pub fn err_focus_canon() {
+        let paths = make_paths(MIN_ABS..64, draw::common).filter(|p| !is_canonical(p));
         for path in paths.take(256) {
-            test_err_preference(&path);
+            test_err_has_canon(&path);
+        }
+    }
+
+    #[test]
+    pub fn err_focus_parent() {
+        let paths = make_paths(MIN_ABS..64, draw::common).filter(|p| !is_parentless(p));
+        for path in paths.take(256) {
+            test_err_has_parent(&path);
         }
     }
 }

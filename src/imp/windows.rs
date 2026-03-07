@@ -11,6 +11,12 @@ use super::super::trivial::{
     cast_ref_unchecked, ConvertError as Ec, Error as E, Normpath, NormpathBuf,
 };
 
+macro_rules! bytes {
+    ($path:expr) => {
+        $path.as_os_str().as_encoded_bytes()
+    };
+}
+
 macro_rules! len {
     ($path:expr) => {
         $path.as_os_str().len()
@@ -18,7 +24,7 @@ macro_rules! len {
 }
 
 fn prefix_of(path: &Path) -> Option<(PrefixComponent<'_>, &Path)> {
-    let bytes = path.as_os_str().as_encoded_bytes();
+    let bytes = bytes!(path);
     let prefix = match bytes.get(..2)? {
         [b'a'..=b'z' | b'A'..=b'Z', b':'] | [b'/' | b'\\', b'/' | b'\\'] => {
             let mut components = path.components();
@@ -149,23 +155,20 @@ fn search_next(s: &mut Searcher<'_>) -> Option<E> {
 }
 
 impl<'a> Searcher<'a> {
-    fn new(value: &'a Path) -> Result<Self, E> {
-        let bytes = value.as_os_str().as_encoded_bytes();
+    fn new(value: &'a Path) -> Self {
+        let bytes = bytes!(value);
         if bytes.len() <= 1 {
-            match bytes.first() {
-                Some(b'.') => Err(E::NotCanonical),
-                it => Ok(Self {
-                    haystack: &[],
-                    level: 0,
-                    err_slash: matches!(it, Some(b'/')),
-                }),
+            Self {
+                haystack: &[],
+                level: 0,
+                err_slash: matches!(bytes.first(), Some(b'/')),
             }
         } else {
-            Ok(Self {
+            Self {
                 haystack: bytes,
                 level: 0,
                 err_slash: matches!(bytes.first(), Some(b'/')),
-            })
+            }
         }
     }
 }
@@ -178,19 +181,23 @@ impl Iterator for Searcher<'_> {
     }
 }
 
-fn check_namespace_prefix<'a>(
-    path: &'a Path,
-    name: usize,
-    tail: &'a Path,
-) -> (&'a Path, Option<E>) {
-    let bytes = path.as_os_str().as_encoded_bytes();
+fn check_disk<'a>(path: &'a Path, letter: bool, tail: &'a Path) -> (&'a Path, Option<E>) {
+    let bytes = bytes!(path);
+    if tail.as_os_str().is_empty() {
+        (Path::new("."), Some(E::NotCanonical))
+    } else if letter && bytes[0].is_ascii_lowercase() {
+        (tail, Some(E::NotCanonical))
+    } else {
+        (tail, None)
+    }
+}
+
+fn check_ns<'a>(path: &'a Path, name: usize, tail: &'a Path) -> (&'a Path, Option<E>) {
+    let bytes = bytes!(path);
     debug_assert!(matches!(bytes[0], b'/' | b'\\'));
     debug_assert!(matches!(bytes[1], b'/' | b'\\'));
     debug_assert!(matches!(bytes[2 + name], b'/' | b'\\'));
-    debug_assert!(matches!(
-        tail.as_os_str().as_encoded_bytes().first(),
-        None | Some(b'/' | b'\\')
-    ));
+    debug_assert!(matches!(bytes!(tail).first(), None | Some(b'/' | b'\\')));
 
     let is_phony_root = len!(tail) == 1;
     if is_phony_root {
@@ -204,18 +211,16 @@ fn check_namespace_prefix<'a>(
 
 fn check_prefix(path: &Path) -> Option<(&Path, Option<E>)> {
     let (prefix, tail) = match prefix_of(path) {
-        Some(pair) => pair,
-        None => return Some((path, Some(E::NotAbsolute))),
+        Some((prefix, tail)) => (Some(prefix), tail),
+        None => (None, path),
     };
 
     use Prefix::*;
-    match prefix.kind() {
-        Disk(_) => match prefix.as_os_str().as_encoded_bytes()[0] {
-            b'a'..=b'z' => Some((tail, Some(E::NotCanonical))),
-            _ => Some((tail, None)),
-        },
-        DeviceNS(_) => Some(check_namespace_prefix(path, 1, tail)),
-        UNC(server, _) => Some(check_namespace_prefix(path, server.len(), tail)),
+    match prefix.map(|it| it.kind()) {
+        None => Some(check_disk(path, false, tail)),
+        Some(Disk(_)) => Some(check_disk(path, true, tail)),
+        Some(DeviceNS(_)) => Some(check_ns(path, 1, tail)),
+        Some(UNC(server, _)) => Some(check_ns(path, server.len(), tail)),
         _ => None,
     }
 }
@@ -227,7 +232,7 @@ fn check_path_quick(path: &Path) -> Result<(), E> {
         Some((tail, None)) => tail,
     };
 
-    match Searcher::new(tail)?.next() {
+    match Searcher::new(tail).next() {
         Some(err) => Err(err),
         None => Ok(()),
     }
@@ -240,7 +245,7 @@ fn check_path_parentless(path: &Path) -> Result<(), E> {
     };
 
     let mut not_canonical = matches!(err, Some(E::NotCanonical));
-    for err in Searcher::new(tail)? {
+    for err in Searcher::new(tail) {
         match err {
             E::NotCanonical => not_canonical = true,
             E::ContainsParent => return Err(E::ContainsParent),
@@ -263,7 +268,7 @@ fn check_path_canonical(path: &Path) -> Result<(), E> {
     };
 
     let mut has_parent = false;
-    for err in Searcher::new(tail)? {
+    for err in Searcher::new(tail) {
         match err {
             E::NotCanonical => return Err(E::NotCanonical),
             E::ContainsParent => has_parent = true,
@@ -431,6 +436,10 @@ fn normalize_in_place(path: &mut Vec<u8>, prefix: Option<PrefixCharacteristic>) 
     }
 
     path.truncate(pos);
+
+    if pos == start && matches!(prefix, Some(Disk) | None) {
+        path.push(b'.');
+    }
 
     if bottom >= start + 2 {
         Some(E::ContainsParent)
@@ -651,8 +660,8 @@ pub fn push(buf: &mut PathBuf, path: &Path) -> Result<(), E> {
 }
 
 pub fn strip<'a>(path: &'a Path, base: &Path) -> Option<&'a Path> {
-    let path = path.as_os_str().as_encoded_bytes();
-    let base = base.as_os_str().as_encoded_bytes();
+    let path = bytes!(path);
+    let base = bytes!(base);
 
     if path.starts_with(base) {
         match path.get(base.len()) {
